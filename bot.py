@@ -2,69 +2,83 @@ import os
 import asyncio
 from aiohttp import web
 from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
 
-# === Настройки через environment variables ===
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-FORWARD_CHAT_ID = int(os.environ["FORWARD_CHAT_ID"])
-THREAD_ID = int(os.environ["THREAD_ID"])
-PORT = int(os.environ.get("PORT", 10000))  # порт для Render
+# ======== Настройки ========
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+FORWARD_CHAT_ID = int(os.environ.get("FORWARD_CHAT_ID", 0))  # ID чата для пересылки
+PORT = int(os.environ.get("PORT", 10000))  # порт Render Web Service
 
-# === Обработчик входящих сообщений ===
+# ======== Хэндлеры ========
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ответ на команду /start"""
+    await update.message.reply_text("Бот запущен и готов к работе!")
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.message.from_user
-    sender_name = user.full_name
-    sender_username = f"@{user.username}" if user.username else "(нет username)"
-    sender_id = user.id
+    """Пересылает сообщение в FORWARD_CHAT_ID и отвечает отправителю"""
+    sender = update.message.from_user
+    text = update.message.text
 
+    # Формируем пересылаемое сообщение
     forward_text = (
-        f"Сообщение от {sender_name}\n"
-        f"Username: {sender_username}\n"
-        f"Telegram ID: {sender_id}\n\n"
-        f"{update.message.text}"
+        f"От: {sender.full_name} (@{sender.username if sender.username else 'нет'})\n"
+        f"ID: {sender.id}\n"
+        f"Сообщение:\n{text}"
     )
 
-    # Пересылаем сообщение в указанный thread
-    await context.bot.send_message(
-        chat_id=FORWARD_CHAT_ID,
-        text=forward_text,
-        message_thread_id=THREAD_ID
-    )
+    # Пересылаем в целевой чат
+    await context.bot.send_message(chat_id=FORWARD_CHAT_ID, text=forward_text)
 
     # Отвечаем отправителю
-    await update.message.reply_text("Спасибо за ваше сообщение")
+    await update.message.reply_text("Ваше сообщение было получено и переслано.")
 
-# === Инициализация Telegram бота ===
-async def init_bot():
+# ======== Запуск бота ========
+async def run_bot():
     application = ApplicationBuilder().token(BOT_TOKEN).build()
-    # Обработчик текстовых сообщений (кроме команд)
+
+    # Регистрируем хэндлеры
+    application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    await application.initialize()  # важно!
-    return application
 
-# === Простейший Web Service для Render ===
-async def init_web():
-    async def health(request):
-        return web.Response(text="Bot is alive!")
+    # Инициализация и запуск polling
+    await application.initialize()
+    polling_task = asyncio.create_task(application.start_polling())
 
+    return application, polling_task
+
+# ======== Web Service для Render ========
+async def handle_root(request):
+    return web.Response(text="Bot is running!")
+
+async def main():
+    # Запуск бота
+    application, polling_task = await run_bot()
+
+    # Настройка веб-сервиса
     app = web.Application()
-    app.add_routes([web.get("/", health)])
+    app.router.add_get("/", handle_root)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
 
-# === Главная функция запуска ===
-async def main():
-    # Инициализируем Telegram bot
-    application = await init_bot()
+    print(f"Service running on port {PORT}")
 
-    # Запускаем web-сервер (Render будет видеть открытый порт)
-    await init_web()
+    # Держим сервис и polling живыми
+    try:
+        await polling_task
+    finally:
+        await application.stop()
+        await application.shutdown()
+        await runner.cleanup()
 
-    # Запускаем polling (бот слушает сообщения)
-    await application.run_polling()
-
-# === Старт ===
-if __name__ == "__main__":
-    asyncio.run(main())
+# ======== Запуск ========
+loop = asyncio.get_event_loop()
+loop.create_task(main())
+loop.run_forever()
